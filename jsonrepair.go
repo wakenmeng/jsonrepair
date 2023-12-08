@@ -43,11 +43,18 @@ func (t *RepairText) CharCode(i int) rune {
 	return t.text[i]
 }
 
+func (t *RepairText) Char(i int) string {
+	if i >= len(t.text) {
+		return ""
+	}
+	return string(t.text[i])
+}
+
 func (t *RepairText) Slice(a, b int) []rune {
 	return t.text[a:min(b, len(t.text))]
 }
 
-func JsonRepair(text string) (string, error) {
+func JSONRepair(text string) (string, error) {
 	//i := 0
 
 	t := RepairText{
@@ -74,6 +81,11 @@ func JsonRepair(text string) (string, error) {
 	} else if processedComma {
 		t.output = []rune(stripLastOccurrence(string(t.output), ",", false))
 	}
+	for t.CharCode(t.i) == codeClosingBrace || t.CharCode(t.i) == codeClosingBracket {
+		t.i++
+		t.parseWhitespaceAndSkipComments()
+	}
+
 	if t.i >= len(t.text) {
 		return string(t.output), nil
 	}
@@ -99,7 +111,7 @@ func (t *RepairText) parseValue() (bool, error) {
 	} else if processed {
 		return true, nil
 	}
-	if processed, err = t.parseString(); err != nil {
+	if processed, err = t.parseString(false); err != nil {
 		return false, err
 	} else if processed {
 		return true, nil
@@ -179,7 +191,7 @@ func (t *RepairText) parseObject() (bool, error) {
 			}
 
 			var processedKey bool
-			processedKey, err = t.parseString()
+			processedKey, err = t.parseString(false)
 			if err != nil {
 				return false, err
 			}
@@ -202,8 +214,9 @@ func (t *RepairText) parseObject() (bool, error) {
 			}
 			t.parseWhitespaceAndSkipComments()
 			processedColon := t.parseCharacter(codeColon)
+			truncatedtext := t.i >= len(t.text)
 			if !processedColon {
-				if IsStartOfValue(t.text[t.i]) {
+				if truncatedtext || IsStartOfValue(t.text[t.i]) {
 					t.output = InsertBeforeLastWhitespace(t.output, ":")
 				} else {
 					return false, ColonExpectedError.At(t.i)
@@ -214,7 +227,7 @@ func (t *RepairText) parseObject() (bool, error) {
 				return false, err
 			}
 			if !processedValue {
-				if processedColon {
+				if truncatedtext || processedColon {
 					t.output = append(t.output, []rune("null")...)
 				} else {
 					return false, ColonExpectedError.At(t.i)
@@ -289,6 +302,7 @@ func (t *RepairText) parseUnquotedString() (bool, error) {
 			return true, nil
 		} else {
 			// repair unquoted string
+			// also, repair undefined to null
 			for IsWhitespace(t.CharCode(t.i-1)) && t.i > 0 {
 				t.i--
 			}
@@ -299,6 +313,11 @@ func (t *RepairText) parseUnquotedString() (bool, error) {
 				ss, _ := json.Marshal(symbol) // TODO
 				t.output = append(t.output, []rune(string(ss))...)
 			}
+			if t.CharCode(t.i) == codeDoubleQuote {
+				// we had a missing start quote, but now we encountered the end quote, so we can skip that one
+				t.i++
+			}
+
 			return true, nil
 		}
 	}
@@ -306,7 +325,7 @@ func (t *RepairText) parseUnquotedString() (bool, error) {
 }
 
 func (t *RepairText) parseCharacter(code rune) bool {
-	if t.CharCode(t.i) == code {
+	if t.CharCode(t.i) == code && t.i < len(t.text) {
 		t.output = append(t.output, t.text[t.i])
 		t.i++
 		return true
@@ -351,7 +370,7 @@ func (t *RepairText) atEndOfBlockComment() bool {
 	return t.CharCode(t.i) == codeAsterisk && t.CharCode(t.i+1) == codeSlash
 }
 
-func (t *RepairText) parseString() (bool, error) {
+func (t *RepairText) parseString(stopAtDelimiter bool) (bool, error) {
 	var skipEscapeChars = t.CharCode(t.i) == codeBackslash
 	if skipEscapeChars {
 		t.i++
@@ -359,53 +378,69 @@ func (t *RepairText) parseString() (bool, error) {
 	}
 	if IsQuote(t.CharCode(t.i)) {
 		var isEndQuote func(rune) bool
-		if IsSingleQuoteLike(t.CharCode(t.i)) {
-			isEndQuote = IsSingleQuoteLike
+		if IsDoubleQuote(t.CharCode(t.i)) {
+			isEndQuote = IsDoubleQuote
 		} else {
-			if IsDoubleQuote(t.CharCode(t.i)) {
-				isEndQuote = IsDoubleQuote
+			if isSingleQuote(t.CharCode(t.i)) {
+				isEndQuote = isSingleQuote
 			} else {
-				isEndQuote = IsDoubleQuoteLike
+				if IsSingleQuoteLike(t.CharCode(t.i)) {
+					isEndQuote = IsSingleQuoteLike
+				} else {
+					isEndQuote = IsDoubleQuoteLike
+				}
 			}
 		}
-		t.output = append(t.output, '"')
-		t.i++
 
-		for t.i < len(t.text) && !isEndQuote(t.CharCode(t.i)) {
+		//t.output = append(t.output, '"')
+		iBefore := t.i
+
+		tmpOutput := []rune(`"`)
+		t.i++
+		var isEndofString func(rune) bool
+		if stopAtDelimiter {
+			isEndofString = IsDelimiter
+		} else {
+			isEndofString = isEndQuote
+		}
+
+		for t.i < len(t.text) && !isEndofString(t.CharCode(t.i)) {
 			if t.CharCode(t.i) == codeBackslash {
-				char := string(t.text[t.i+1])
+				char := t.Char(t.i + 1)
 				if _, found := escapeCharacters[char]; found {
-					t.output = append(t.output, t.Slice(t.i, t.i+2)...)
+					tmpOutput = append(tmpOutput, t.Slice(t.i, t.i+2)...)
 					t.i += 2
 				} else if char == "u" {
-					if IsHex(t.CharCode(t.i+2)) &&
-						IsHex(t.CharCode(t.i+3)) &&
-						IsHex(t.CharCode(t.i+4)) &&
-						IsHex(t.CharCode(t.i+5)) {
-
-						t.output = append(t.output, t.Slice(t.i, t.i+6)...)
+					var j = 2
+					for j < 6 && IsHex(t.CharCode(t.i+j)) {
+						j++
+					}
+					if j == 6 {
+						tmpOutput = append(tmpOutput, t.Slice(t.i, t.i+6)...)
 						t.i += 6
+					} else if (t.i + j) >= len(t.text) {
+						t.i = len(t.text)
 					} else {
 						return false, InvalidUnicodeCharacter(string(t.Slice(t.i, t.i+6))).At(t.i)
 					}
 				} else {
-					t.output = append(t.output, []rune(char)...)
+					tmpOutput = append(tmpOutput, []rune(char)...)
 					t.i += 2
 				}
 			} else {
-				char := string(t.text[t.i])
+				char := t.Char(t.i)
 				code := t.CharCode(t.i)
 				if code == codeDoubleQuote && t.CharCode(t.i-1) != codeBackslash {
-					t.output = append(t.output, []rune("\\"+char)...)
+					tmpOutput = append(tmpOutput, []rune("\\"+char)...)
 					t.i++
 				} else if IsControlCharacter(code) {
-					t.output = append(t.output, []rune(controlCharacters[char])...)
+					tmpOutput = append(tmpOutput, []rune(controlCharacters[char])...)
 					t.i++
 				} else {
 					if !IsValidStringCharacter(code) {
 						return false, InvalidUnicodeCharacter(char).At(t.i)
 					}
-					t.output = append(t.output, []rune(char)...)
+					tmpOutput = append(tmpOutput, []rune(char)...)
 					t.i++
 				}
 			}
@@ -416,22 +451,31 @@ func (t *RepairText) parseString() (bool, error) {
 				}
 			}
 		}
-		if IsQuote(t.CharCode(t.i)) {
-			if t.CharCode(t.i) != codeDoubleQuote {
-				// repair non-normalized quote
-			}
-			t.output = append(t.output, '"')
+
+		var hasEndQuote = IsQuote(t.CharCode(t.i))
+		var valid = hasEndQuote && ((t.i+1) >= len(t.text) || IsDelimiter(nextNonWhiteSpaceCharacter(t.text, t.i+1)))
+		if !valid && !stopAtDelimiter {
+			t.i = iBefore
+			return t.parseString(true)
+		}
+		if hasEndQuote {
+			tmpOutput = append(tmpOutput, []rune(`"`)...)
 			t.i++
 		} else {
-			t.output = append(t.output, '"')
+			tmpOutput = InsertBeforeLastWhitespace(tmpOutput, `"`)
 		}
-		t.parseConcatenatedString()
+
+		t.output = append(t.output, tmpOutput...)
+		_, err := t.parseConcatenatedString()
+		if err != nil {
+			return false, fmt.Errorf("failed to parseConcatenatedString: %v", err)
+		}
 		return true, nil
 	}
 	return false, nil
 }
 
-func (t *RepairText) parseConcatenatedString() bool {
+func (t *RepairText) parseConcatenatedString() (bool, error) {
 	var processed bool
 	t.parseWhitespaceAndSkipComments()
 	for t.CharCode(t.i) == codePlus {
@@ -440,10 +484,17 @@ func (t *RepairText) parseConcatenatedString() bool {
 		t.parseWhitespaceAndSkipComments()
 		t.output = []rune(stripLastOccurrence(string(t.output), `"`, true))
 		start := len(t.output)
-		t.parseString()
-		t.output = RemoveAtIndex(t.output, start, 1)
+		parsedStr, err := t.parseString(false)
+		if err != nil {
+			return false, err
+		}
+		if parsedStr {
+			t.output = RemoveAtIndex(t.output, start, 1)
+		} else {
+			t.output = InsertBeforeLastWhitespace(t.output, `"`)
+		}
 	}
-	return processed
+	return processed, nil
 }
 
 func (t *RepairText) skipEscapeCharacter() bool {
@@ -460,14 +511,11 @@ func (t *RepairText) parseNumber() (bool, error) {
 			return true, nil
 		}
 	}
-	if t.CharCode(t.i) == codeZero {
+
+	for IsDigit(t.CharCode(t.i)) {
 		t.i++
-	} else if IsNonZeroDigit(t.CharCode(t.i)) {
-		t.i++
-		for IsDigit(t.CharCode(t.i)) {
-			t.i++
-		}
 	}
+
 	if t.CharCode(t.i) == codeDot {
 		t.i++
 		if ok, err := t.expectDigitOrRepair(start); err != nil {
@@ -494,7 +542,12 @@ func (t *RepairText) parseNumber() (bool, error) {
 		}
 	}
 	if t.i > start {
-		t.output = append(t.output, t.Slice(start, t.i)...)
+		numStr := string(t.Slice(start, t.i))
+		if regexNumberWithLeadingZero.MatchString(numStr) {
+			t.output = append(t.output, []rune(`"`+numStr+`"`)...)
+		} else {
+			t.output = append(t.output, []rune(numStr)...)
+		}
 		return true, nil
 	}
 	return false, nil
@@ -514,7 +567,7 @@ func (t *RepairText) expectDigitOrRepair(start int) (bool, error) {
 }
 
 func (t *RepairText) expectDigit(start int) error {
-	if !IsDigit(t.CharCode(t.i)) {
+	if !IsDigit(t.CharCode(t.i)) && t.i < len(t.text) {
 		numSoFar := string(t.Slice(start, t.i))
 		return ExpectDigit(numSoFar, string(t.text[t.i])).At(t.i)
 	}

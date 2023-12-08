@@ -35,6 +35,10 @@ func TestParsing(t *testing.T) {
 			cases: []string{
 				`[]`,
 				`[{}]`,
+				`[1,2,3]`,
+				`[ 1 , 2 , 3 ]`,
+				`[1,2,[3,4,5]]`,
+				`[{}]`,
 				`{"a":[]}`,
 				`[1, "hi", true, false, null, {}, []]`,
 			},
@@ -98,6 +102,7 @@ func TestParsing(t *testing.T) {
 			name: "supports escaped unicode characters in a string",
 			cases: []string{
 				`"\u2605"`,
+				`"\u2605A"`,
 				`"\ud83d\ude00"`,
 				`"\u0439\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f"`,
 			},
@@ -115,13 +120,10 @@ func TestParsing(t *testing.T) {
 	for _, tt := range ts {
 		caseHasErr := false
 		for _, text := range tt.cases {
-			parsed, err := JsonRepair(text)
+			parsed, err := JSONRepair(text)
 			if parsed != text {
-				t.Errorf("failed on group: %s, case: %s, got: %s", tt.name, text, parsed)
+				t.Errorf("failed on group: %s, case: %s, got: %s, err: %v", tt.name, text, parsed, err)
 				caseHasErr = true
-			}
-			if err != nil {
-				t.Errorf("failed on group: %s, case: %s, err: %v", tt.name, text, err)
 			}
 		}
 		if !caseHasErr {
@@ -154,6 +156,61 @@ func TestRepairValidJSON(t *testing.T) {
 			},
 		},
 		{
+			name: "should add missing end quote",
+			cases: []Case{
+				{`"abc`, `"abc"`},
+				{`'abc`, `"abc"`},
+				{"\u2018abc", `"abc"`},
+			},
+		},
+		{
+			name: "should repair truncated JSON",
+			cases: []Case{
+				{`"foo`, `"foo"`},
+				{`[`, `[]`},
+				{`["foo`, `["foo"]`},
+				{`["foo"`, `["foo"]`},
+				{`["foo",`, `["foo"]`},
+				{`{"foo":"bar"`, `{"foo":"bar"}`},
+				{`{"foo":"bar`, `{"foo":"bar"}`},
+				{`{"foo":`, `{"foo":null}`},
+				{`{"foo"`, `{"foo":null}`},
+				{`{"foo`, `{"foo":null}`},
+				{`{`, `{}`},
+				{`2.`, `2.0`},
+				{`2e`, `2e0`},
+				{`2e+`, `2e+0`},
+				{`2e-`, `2e-0`},
+				{`{"foo":"bar\u20`, `{"foo":"bar"}`},
+				{`"\u`, `""`},
+				{`"\u2`, `""`},
+				{`"\u260`, `""`},
+				{`"\\u2605`, `"\\u2605"`},
+				{`{"s \ud`, `{"s": null}`},
+			},
+		},
+		{
+			name: "should add missing start quote",
+			cases: []Case{
+				{`abc"`, `"abc"`},
+				{`[a","b"]`, `["a","b"]`},
+				{`[a",b"]`, `["a","b"]`},
+				{`{"a":"foo","b":"bar"}`, `{"a":"foo","b":"bar"}`},
+				{`{a":"foo","b":"bar"}`, `{"a":"foo","b":"bar"}`},
+				{`{"a":"foo",b":"bar"}`, `{"a":"foo","b":"bar"}`},
+				{`{"a":foo","b":"bar"}`, `{"a":"foo","b":"bar"}`},
+			},
+		},
+		// {`[\n"abc,  \n"def"\n]'), '[\n"abc").toBe( \n"def"\n]')
+		{
+			name: "should stop at the first next return when missing an end quote",
+			cases: []Case{
+				{"[\n\"abc,\n\"def\"\n]", "[\n\"abc\",\n\"def\"\n]"},
+				{"[\"abc]\n", "[\"abc\"]\n"},
+				{"[\"abc  ]\n", "[\"abc\"  ]\n"},
+			},
+		},
+		{
 			name: "should replace single quotes with double quotes",
 			cases: []Case{
 				{"{'a':2}", `{"a":2}`},
@@ -174,6 +231,16 @@ func TestRepairValidJSON(t *testing.T) {
 			name: "should not replace special quotes inside a normal string",
 			cases: []Case{
 				{`"Rounded “ quote"`, `"Rounded “ quote"`},
+				{`'Rounded “ quote'`, `"Rounded “ quote"`},
+				{`"Rounded ’ quote"`, `"Rounded ’ quote"`},
+				{`'Rounded ’ quote'`, `"Rounded ’ quote"`},
+				{`'Double " quote'`, `"Double \" quote"`},
+			},
+		},
+		{
+			name: "should not crash when repairing quotes",
+			cases: []Case{
+				{`{pattern: '’'}`, `{"pattern": "’"}`},
 			},
 		},
 		{
@@ -218,7 +285,11 @@ func TestRepairValidJSON(t *testing.T) {
 				{"\"hello\nworld\"", `"hello\nworld"`},
 				{"\"hello\rworld\"", `"hello\rworld"`},
 				{"\"hello\tworld\"", `"hello\tworld"`},
+				{"{\"key\nafter\": \"foo\"}", "{\"key\\nafter\": \"foo\"}"},
 				{"{\"value\n\": \"dc=hcm,dc=com\"}", `{"value\n": "dc=hcm,dc=com"}`},
+				{"[\"hello\nworld\"]", `["hello\nworld"]`},
+				{"[\"hello\nworld\"   ]", `["hello\nworld"   ]`},
+				{"[\"hello\nworld\"\n]", "[\"hello\\nworld\"\n]"},
 			},
 		},
 		{
@@ -294,9 +365,6 @@ func TestRepairValidJSON(t *testing.T) {
 				{`\"hello \\"world\\"\"`, `"hello \"world\""`},
 				{`[\"hello \\"world\\"\"]`, `["hello \"world\""]`},
 				{`{\"stringified\": \"hello \\"world\\"\"}`, `{"stringified": "hello \"world\""}`},
-				// the following is weird but understandable
-				{`[\"hello\, \"world\"]`, `["hello, ","world\\","]"]`},
-
 				// the following is sort of invalid: the end quote should be escaped too,
 				// but the fixed result is most likely what you want in the end
 				{`\"hello"`, `"hello"`},
@@ -476,12 +544,60 @@ func TestRepairValidJSON(t *testing.T) {
 				{"[a,b\nc]", "[\"a\",\"b\",\n\"c\"]"},
 			},
 		},
+		{
+			name: "should repair newline separated json (for example from MongoDB)",
+			cases: []Case{
+				{
+					"" + "/* 1 */\n" + "{}\n" + "\n" + "/* 2 */\n" + "{}\n" + "\n" + "/* 3 */\n" + "{}\n",
+					"[\n\n{},\n\n\n{},\n\n\n{}\n\n]",
+				},
+			},
+		},
+		{
+			name: "should repair newline separated json having commas",
+			cases: []Case{
+				{
+					"" + "/* 1 */\n" + "{},\n" + "\n" + "/* 2 */\n" + "{},\n" + "\n" + "/* 3 */\n" + "{}\n",
+					"[\n\n{},\n\n\n{},\n\n\n{}\n\n]",
+				},
+			},
+		},
+		{
+			name: "should repair newline separated json having commas and trailing comma",
+			cases: []Case{
+				{
+					"" + "/* 1 */\n" + "{},\n" + "\n" + "/* 2 */\n" + "{},\n" + "\n" + "/* 3 */\n" + "{},\n",
+					"[\n\n{},\n\n\n{},\n\n\n{}\n\n]",
+				},
+			},
+		},
+		{
+			name: "should repair a comma separated list with value",
+			cases: []Case{
+				{`1,2,3`, "[\n1,2,3\n]"},
+				{`1,2,3,`, "[\n1,2,3\n]"},
+				{"1\n2\n3", "[\n1,\n2,\n3\n]"},
+				{"a\nb", "[\n\"a\",\n\"b\"\n]"},
+				{`a,b`, "[\n\"a\",\"b\"\n]"},
+			},
+		},
+		{
+			name: "should repair a number with leading zero",
+			cases: []Case{
+				{`0789`, `"0789"`},
+				{`000789`, `"000789"`},
+				{`001.2`, `"001.2"`},
+				{`002e3`, `"002e3"`},
+				{`[0789]`, `["0789"]`},
+				{`{value:0789}`, `{"value":"0789"}`},
+			},
+		},
 	}
 
 	for _, tt := range ts {
 		hasTestErr := false
 		for _, c := range tt.cases {
-			parsed, err := JsonRepair(c.Input)
+			parsed, err := JSONRepair(c.Input)
 			if parsed != c.Want {
 				hasTestErr = true
 				t.Errorf("failed on group: %s, case: %s, got: %s, expect: %s", tt.name, c.Input, parsed, c.Want)
@@ -515,28 +631,24 @@ func TestNonRepairable(t *testing.T) {
 			ErrStr: `Object key expected at position 1`,
 		},
 		{
-			Input:  `{"a":2,]`,
-			ErrStr: `Unexpected character "]" at position 7`,
+			Input:  `{"a":2}{}`,
+			ErrStr: `Unexpected character "{" at position 7`,
 		},
 		{
 			Input:  `{"a" ]`,
 			ErrStr: `Colon expected at position 5`,
 		},
 		{
-			Input:  `{}}`,
-			ErrStr: `Unexpected character "}" at position 2`,
-		},
-		{
-			Input:  `[2,}`,
-			ErrStr: `Unexpected character "}" at position 3`,
+			Input:  `{"a":2}foo`,
+			ErrStr: `Unexpected character "f" at position 7`,
 		},
 		{
 			Input:  `2.3.4`,
 			ErrStr: `Unexpected character "." at position 3`,
 		},
 		{
-			Input:  `2..3`,
-			ErrStr: "Invalid number '2.', expecting a digit but got '.' at position 2",
+			Input:  `234..5`,
+			ErrStr: "Invalid number '234.', expecting a digit but got '.' at position 4",
 		},
 		{
 			Input:  `2e3.4`,
@@ -566,12 +678,11 @@ func TestNonRepairable(t *testing.T) {
 
 	hasTestErr := false
 	for _, tt := range ts {
-		_, err := JsonRepair(tt.Input)
+		repaired, err := JSONRepair(tt.Input)
 		if err == nil {
 			hasTestErr = true
-			t.Errorf("an error is expected, but got nil for input %s", tt.ErrStr)
-		}
-		if err.Error() != tt.ErrStr {
+			t.Errorf("an error is expected, but got nil for input %s, got repaird: %s", tt.Input, repaired)
+		} else if err.Error() != tt.ErrStr {
 			hasTestErr = true
 			t.Errorf("case: %s, error is: [%s], expect: [%s]", tt.Input, err, tt.ErrStr)
 		}

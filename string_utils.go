@@ -25,19 +25,18 @@ const (
 	codePlus                    = 0x2b   // "+"
 	codeMinus                   = 0x2d   // "-"
 	codeQuote                   = 0x27   // "'"
-	codeZero                    = 0x30
-	codeOne                     = 0x31
-	codeNine                    = 0x39
-	codeComma                   = 0x2c // ","
-	codeDot                     = 0x2e // "." (dot, period)
-	codeColon                   = 0x3a // ":"
-	codeSemicolon               = 0x3b // ";"
-	codeUppercaseA              = 0x41 // "A"
-	codeLowercaseA              = 0x61 // "a"
-	codeUppercaseE              = 0x45 // "E"
-	codeLowercaseE              = 0x65 // "e"
-	codeUppercaseF              = 0x46 // "F"
-	codeLowercaseF              = 0x66 // "f"
+	codeZero                    = 0x30   // 0
+	codeNine                    = 0x39   // 9
+	codeComma                   = 0x2c   // ","
+	codeDot                     = 0x2e   // "." (dot, period)
+	codeColon                   = 0x3a   // ":"
+	codeSemicolon               = 0x3b   // ";"
+	codeUppercaseA              = 0x41   // "A"
+	codeLowercaseA              = 0x61   // "a"
+	codeUppercaseE              = 0x45   // "E"
+	codeLowercaseE              = 0x65   // "e"
+	codeUppercaseF              = 0x46   // "F"
+	codeLowercaseF              = 0x66   // "f"
 	codeNonBreakingSpace        = 0xa0
 	codeEnQuad                  = 0x2000
 	codeHairSpace               = 0x200a
@@ -62,10 +61,6 @@ func IsDigit(code rune) bool {
 	return code >= codeZero && code <= codeNine
 }
 
-func IsNonZeroDigit(code rune) bool {
-	return code >= codeOne && code <= codeNine
-}
-
 func IsValidStringCharacter(code rune) bool {
 	return code >= 0x20 && code <= 0x10ffff
 }
@@ -82,15 +77,17 @@ var Delimiters = map[rune]bool{
 	'\n': true,
 }
 
-var regexDelimiter = regexp.MustCompile(`^[,:[\]{}()\n]$`)
+var regexDelimiter = regexp.MustCompile(`^[,:[\]{}()\n+]$`)
 
 func IsDelimiter(c rune) bool {
-	return regexDelimiter.Match([]byte{byte(c)}) || (c != 0 && IsQuote(c))
+	return regexDelimiter.Match([]byte{byte(c)}) || IsQuote(c)
 	// return Delimiters[r] || (r != 0 && IsQuote(int(r)))
 	//return regexDelimiter.test(char) || (char && IsQuote(char.charCodeAt(0)))
 }
 
 var regexStartOfValue = regexp.MustCompile(`^[[{\w-]$`)
+
+var regexNumberWithLeadingZero = regexp.MustCompile(`^0\d`)
 
 func IsStartOfValue(r rune) bool {
 	return regexStartOfValue.Match([]byte{byte(r)}) || (r != 0 && IsQuote(r))
@@ -159,6 +156,14 @@ func IsSingleQuoteLike(code rune) bool {
 }
 
 /**
+ * Test whether the given character is a single quote character.
+ * Does NOT test for special variants of single quotes.
+ */
+func isSingleQuote(code rune) bool {
+	return code == codeQuote
+}
+
+/**
  * Strip last occurrence of textToStrip from text
  */
 func stripLastOccurrence(text, textToStrip string, stripRemainingText bool) string {
@@ -203,4 +208,15 @@ var endWithCommaOrNewlineReg = regexp.MustCompile(`[,\n][ \t\r]*$`)
 
 func EndsWithCommaOrNewline(text string) bool {
 	return endWithCommaOrNewlineReg.MatchString(text)
+}
+
+func nextNonWhiteSpaceCharacter(text []rune, start int) rune {
+	var i = start
+	for i < len(text) && IsWhitespace(text[i]) {
+		i++
+	}
+	if i >= len(text) {
+		return -1
+	}
+	return text[i]
 }
